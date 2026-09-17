@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()  # Load PEXELS_API_KEY / PIXABAY_API_KEY etc. from a .env file, if present
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -15,10 +15,11 @@ import shutil
 import os
 from typing import Optional, List, Dict
 
-from .models import VideoRequest, ProjectState, Storyboard
+from .models import VideoRequest, ProjectState, Storyboard, TimelineProject, Track, Clip
 from .stock_fetcher import fetch_media
 from .placeholder import create_placeholder
 from .video_builder import render_storyboard
+from .timeline_renderer import render_timeline, storyboard_to_timeline, timeline_to_storyboard
 from .caption_engine import generate_captions, burn_captions
 
 app = FastAPI(title="AI Video Editor")
@@ -241,15 +242,27 @@ def extract_json_payload(text: str) -> dict:
         raise
 
 
-def build_storyboard_prompt(prompt_template: str, topic: str, duration: float, aspect_ratio: str, style: str) -> str:
+def build_storyboard_prompt(
+    prompt_template: str,
+    topic: str,
+    duration: float,
+    aspect_ratio: str,
+    style: str,
+    voiceover_gender: str = "male",
+    voiceover_tone: str = "professional",
+    voiceover_type: str = "narrator",
+    background_music: str = "upbeat_tech"
+) -> str:
     prompt = prompt_template.replace('[YOUR TOPIC HERE]', topic)
     prompt = re.sub(r'"total_duration":\s*\d+', f'"total_duration": {int(duration)}', prompt)
     prompt = re.sub(r'"aspect_ratio":\s*"[\d:]+"', f'"aspect_ratio": "{aspect_ratio}"', prompt)
     prompt += (
-        '\n\nUse the selected style: ' + style + '.'
-        ' Focus on strong motion graphics, animated typography, pacing, rhythm, and clear scene transitions.'
-        ' Use J-cuts, L-cuts, and standard cuts to maintain viewer interest.'
-        ' Always return only raw valid JSON with no markdown or extra text.'
+        f'\n\nStyle: {style}.'
+        f'\nVoiceover Instructions: Write engaging, natural voiceover narration for every scene.'
+        f' Voiceover Persona: {voiceover_type}, Voice Gender: {voiceover_gender}, Tone: {voiceover_tone}.'
+        f' Soundtrack / Background Music: {background_music}.'
+        ' Focus on strong motion graphics, typography overlays, pacing, and clear scene transitions.'
+        ' Return ONLY raw valid JSON with no markdown formatting or extra text.'
     )
     return prompt
 
@@ -285,6 +298,21 @@ def sanitize_storyboard_dict(raw: dict) -> dict:
 
     raw["aspect_ratio"] = str(raw.get("aspect_ratio", "16:9"))
 
+    # Normalize Audio Config
+    ac = raw.get("audio_config", {})
+    if not isinstance(ac, dict):
+        ac = {}
+    raw["audio_config"] = {
+        "voiceover_enabled": bool(ac.get("voiceover_enabled", True)),
+        "voiceover_gender": str(ac.get("voiceover_gender", "male")).lower(),
+        "voiceover_type": str(ac.get("voiceover_type", "narrator")).lower(),
+        "voiceover_tone": str(ac.get("voiceover_tone", "professional")).lower(),
+        "background_music": str(ac.get("background_music", "upbeat_tech")).lower(),
+        "music_volume": float(ac.get("music_volume", 0.15)),
+        "sfx_enabled": bool(ac.get("sfx_enabled", True)),
+        "sfx_pack": str(ac.get("sfx_pack", "whoosh_hits")).lower()
+    }
+
     valid_cameras = ["static", "pan left", "pan right", "zoom in", "zoom out", "ken burns"]
     valid_transitions = ["cut", "fade", "dissolve", "slide left", "slide right"]
     valid_anim = ["typewriter", "fade-in", "slide-up", "bounce", "none"]
@@ -307,6 +335,7 @@ def sanitize_storyboard_dict(raw: dict) -> dict:
             s["fallback_text"] = str(s.get("fallback_text", s["visual_prompt"]))
             s["start_time"] = str(s.get("start_time", "0:00"))
             s["end_time"] = str(s.get("end_time", "0:05"))
+            s["voiceover_text"] = str(s.get("voiceover_text", "")).strip()
 
             # Normalize motion graphics arrays
             mg = s.get("motion_graphics")
@@ -376,16 +405,22 @@ def save_project_from_storyboard(storyboard: Storyboard) -> dict:
     with open(project_dir / 'storyboard.json', 'w') as f:
         f.write(storyboard.model_dump_json(indent=2))
 
+    timeline = storyboard_to_timeline(storyboard)
+    with open(project_dir / 'timeline.json', 'w') as f:
+        f.write(timeline.model_dump_json(indent=2))
+
     project = ProjectState(
         project_id=project_id,
-        storyboard=storyboard
+        storyboard=storyboard,
+        timeline=timeline
     )
     projects[project_id] = project
-    add_log(project_id, 'STORYBOARD', 40, 'Storyboard ready for media fetching!')
+    add_log(project_id, 'STORYBOARD', 40, 'Storyboard and OpenCut Timeline ready for media fetching!')
 
     return {
         'project_id': project_id,
         'storyboard': storyboard.model_dump(),
+        'timeline': timeline.model_dump(),
         'message': 'Storyboard generated and saved. Ready to fetch media.'
     }
 
@@ -398,11 +433,18 @@ async def generate_storyboard(payload: dict):
     duration = float(payload.get('duration_seconds', 30))
     aspect_ratio = str(payload.get('aspect_ratio', '16:9'))
     style = str(payload.get('style', 'educational'))
+    voiceover_gender = str(payload.get('voiceover_gender', 'male'))
+    voiceover_tone = str(payload.get('voiceover_tone', 'professional'))
+    voiceover_type = str(payload.get('voiceover_type', 'narrator'))
+    background_music = str(payload.get('background_music', 'upbeat_tech'))
 
     if not topic or not prompt_template:
         raise HTTPException(400, 'AI generation requires a topic and a prompt template.')
 
-    prompt_text = build_storyboard_prompt(prompt_template, topic, duration, aspect_ratio, style)
+    prompt_text = build_storyboard_prompt(
+        prompt_template, topic, duration, aspect_ratio, style,
+        voiceover_gender, voiceover_tone, voiceover_type, background_music
+    )
     try:
         raw_response = await call_ai_model(prompt_text)
     except Exception as e:
@@ -417,6 +459,19 @@ async def generate_storyboard(payload: dict):
         storyboard_data = storyboard_data['storyboard']
 
     cleaned = sanitize_storyboard_dict(storyboard_data)
+    # Ensure audio_config from user payload is preserved
+    if "audio_config" not in storyboard_data or not storyboard_data["audio_config"]:
+        cleaned["audio_config"] = {
+            "voiceover_enabled": True,
+            "voiceover_gender": voiceover_gender,
+            "voiceover_tone": voiceover_tone,
+            "voiceover_type": voiceover_type,
+            "background_music": background_music,
+            "music_volume": 0.15,
+            "sfx_enabled": True,
+            "sfx_pack": "whoosh_hits"
+        }
+
     try:
         storyboard = Storyboard.model_validate(cleaned)
     except Exception as e:
@@ -437,7 +492,9 @@ async def create_project(payload: dict):
     add_log(project_id, "INIT", 0, "Project created from JSON storyboard...")
     
     try:
-        raw_storyboard = payload.get("storyboard", payload)
+        if hasattr(payload, "model_dump"):
+            payload = payload.model_dump()
+        raw_storyboard = payload.get("storyboard", payload) if isinstance(payload, dict) else payload
         sanitized = sanitize_storyboard_dict(raw_storyboard)
         storyboard = Storyboard.model_validate(sanitized)
         
@@ -447,17 +504,23 @@ async def create_project(payload: dict):
         with open(project_dir / "storyboard.json", 'w') as f:
             f.write(storyboard.model_dump_json(indent=2))
         
+        timeline = storyboard_to_timeline(storyboard)
+        with open(project_dir / "timeline.json", 'w') as f:
+            f.write(timeline.model_dump_json(indent=2))
+
         project = ProjectState(
             project_id=project_id,
-            storyboard=storyboard
+            storyboard=storyboard,
+            timeline=timeline
         )
         projects[project_id] = project
         
-        add_log(project_id, "STORYBOARD", 40, "Storyboard ready for media fetching!")
+        add_log(project_id, "STORYBOARD", 40, "Storyboard and OpenCut Timeline ready for media fetching!")
         
         return {
             "project_id": project_id,
             "storyboard": storyboard.model_dump(),
+            "timeline": timeline.model_dump(),
             "message": "Storyboard uploaded successfully. Now fetch media."
         }
     except Exception as e:
@@ -524,6 +587,7 @@ async def fetch_project_media(project_id: str):
                     media_dir,
                     scene_id=scene.scene_id,
                     media_type="video",
+                    aspect_ratio=aspect_ratio,
                     session=session
                 )
                 if is_placeholder:
@@ -538,11 +602,13 @@ async def fetch_project_media(project_id: str):
                     found_type = 'placeholder'
                     add_log(project_id, "MEDIA", 50 + int((idx / total_scenes) * 25), f"Scene {idx+1}: Generated placeholder card")
                 else:
-                    add_log(project_id, "MEDIA", 50 + int((idx / total_scenes) * 25), f"Scene {idx+1}: {found_type.capitalize()} downloaded")
+                    label = "Stock Video" if found_type == "video" else "Visual Artwork"
+                    add_log(project_id, "MEDIA", 50 + int((idx / total_scenes) * 25), f"Scene {idx+1}: {label} retrieved")
 
                 return {
                     "scene_id": scene.scene_id,
-                    "path": path,
+                    "path": str(path),
+                    "url": f"/videos/{project_id}/media/{Path(path).name}",
                     "is_placeholder": is_placeholder,
                     "media_type": found_type,
                     "prompt": scene.visual_prompt
@@ -559,20 +625,159 @@ async def fetch_project_media(project_id: str):
     with open(project_dir / "media_map.json", 'w') as f:
         json.dump(media_map, f)
     
+    # Build and sync OpenCut Timeline Project
+    timeline = storyboard_to_timeline(project.storyboard, media_map)
+    project.timeline = timeline
+    with open(project_dir / "timeline.json", 'w') as f:
+        f.write(timeline.model_dump_json(indent=2))
+
     placeholder_count = sum(1 for m in project.media_assets if m["is_placeholder"])
     stock_count = len(project.media_assets) - placeholder_count
-    add_log(project_id, "MEDIA", 75, f"Media fetch complete! ({stock_count} stock clips, {placeholder_count} placeholders)")
+    add_log(project_id, "MEDIA", 75, f"Media fetch complete! ({stock_count} stock visual clips, {placeholder_count} placeholders)")
     
     return {
         "project_id": project_id,
         "media": project.media_assets,
+        "timeline": timeline.model_dump(),
         "placeholders": [m for m in project.media_assets if m["is_placeholder"]]
+    }
+
+
+@app.post("/api/upload-media/{project_id}/{scene_id}")
+async def upload_custom_media(
+    project_id: str,
+    scene_id: int,
+    request: Request,
+    file: Optional[UploadFile] = File(None)
+):
+    """
+    Allows user to upload a custom image/video file or specify an external URL for a specific scene.
+    Updates media_map.json, project.media_assets, storyboard, and timeline.
+    """
+    import urllib.parse
+    if project_id not in projects:
+        raise HTTPException(404, "Project not found")
+
+    project = projects[project_id]
+    project_dir = PROJECTS_DIR / project_id
+    media_dir = project_dir / "media"
+    media_dir.mkdir(exist_ok=True)
+
+    target_path = None
+    media_type = "photo"
+
+    # 1. Handle Multipart File Upload
+    if file and file.filename:
+        filename = file.filename
+        ext = Path(filename).suffix.lower()
+        if ext not in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".mp4", ".mov", ".webm", ".mkv"]:
+            raise HTTPException(400, f"Unsupported file type: {ext}. Use JPG, PNG, WEBP, or MP4/MOV/WEBM.")
+
+        media_type = "video" if ext in [".mp4", ".mov", ".webm", ".mkv"] else "photo"
+        clean_name = re.sub(r'[^\w\-_\.]', '_', filename)
+        save_path = media_dir / f"custom_scene_{scene_id:03d}_{clean_name}"
+
+        content = await file.read()
+        with open(save_path, "wb") as f:
+            f.write(content)
+
+        target_path = save_path
+    else:
+        # 2. Handle JSON payload with URL
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        media_url = body.get("url") or body.get("media_url")
+        if not media_url:
+            raise HTTPException(400, "Please provide either a file upload or an external media URL.")
+
+        url_path = urllib.parse.urlparse(media_url).path
+        ext = Path(url_path).suffix.lower() or ".jpg"
+        if ext in [".mp4", ".mov", ".webm", ".mkv"]:
+            media_type = "video"
+        else:
+            media_type = "photo"
+            if ext not in [".jpg", ".jpeg", ".png", ".webp", ".bmp"]:
+                ext = ".jpg"
+
+        save_path = media_dir / f"custom_scene_{scene_id:03d}{ext}"
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AIVideoEditor/1.0"}
+            async with session.get(media_url, headers=headers, timeout=aiohttp.ClientTimeout(total=25)) as resp:
+                if resp.status != 200:
+                    raise HTTPException(400, f"Failed to download media from URL: HTTP {resp.status}")
+                content = await resp.read()
+                if len(content) < 100:
+                    raise HTTPException(400, "Downloaded media file is empty or invalid.")
+                with open(save_path, "wb") as f:
+                    f.write(content)
+
+        target_path = save_path
+
+    # Update media_map.json
+    media_map_path = project_dir / "media_map.json"
+    media_map = {}
+    if media_map_path.exists():
+        try:
+            with open(media_map_path) as f:
+                media_map = {int(k) if str(k).isdigit() else k: v for k, v in json.load(f).items()}
+        except Exception:
+            media_map = {}
+
+    media_map[scene_id] = str(target_path.resolve())
+    with open(media_map_path, "w") as f:
+        json.dump(media_map, f)
+
+    # Update project media_assets list
+    web_url = f"/videos/{project_id}/media/{target_path.name}"
+    asset_entry = {
+        "scene_id": scene_id,
+        "path": str(target_path.resolve()),
+        "url": web_url,
+        "is_placeholder": False,
+        "media_type": media_type,
+        "prompt": f"Custom Media: {target_path.name}"
+    }
+
+    # Replace existing or append
+    existing_idx = next((i for i, m in enumerate(project.media_assets) if m.get("scene_id") == scene_id), -1)
+    if existing_idx >= 0:
+        project.media_assets[existing_idx] = asset_entry
+    else:
+        project.media_assets.append(asset_entry)
+
+    # Update storyboard fallback
+    if project.storyboard:
+        for sc in project.storyboard.scenes:
+            if sc.scene_id == scene_id:
+                sc.fallback_text = f"Custom: {target_path.name}"
+
+    # Update timeline clips
+    if project.timeline:
+        for t in project.timeline.tracks:
+            if t.type == "video":
+                for clip in t.clips:
+                    if clip.id.endswith(f"-{scene_id}") or clip.name.startswith(f"Scene {scene_id}:"):
+                        clip.source_url = str(target_path.resolve())
+                        clip.media_type = "video" if media_type == "video" else "image"
+        with open(project_dir / "timeline.json", "w") as f:
+            f.write(project.timeline.model_dump_json(indent=2))
+
+    add_log(project_id, "MEDIA", 60, f"Scene {scene_id}: Custom visual applied ({target_path.name})")
+
+    return {
+        "message": "Custom media applied successfully",
+        "asset": asset_entry,
+        "timeline": project.timeline.model_dump() if project.timeline else None,
+        "media_assets": project.media_assets
     }
 
 
 @app.post("/api/render/{project_id}")
 async def render_video(project_id: str, background_tasks: BackgroundTasks, payload: Optional[dict] = None):
-    """Step 3: Assemble final video with FFmpeg"""
+    """Step 3: Assemble final video with FFmpeg (Auto-fetches media if missing)"""
     if project_id not in projects:
         raise HTTPException(404, "Project not found")
     
@@ -594,12 +799,14 @@ async def render_video(project_id: str, background_tasks: BackgroundTasks, paylo
     if not project.storyboard:
         raise HTTPException(400, "No storyboard found")
     
+    media_map = {}
     media_map_path = project_dir / "media_map.json"
-    if not media_map_path.exists():
-        raise HTTPException(400, "Media not fetched yet. Please fetch media first.")
-    
-    with open(media_map_path) as f:
-        media_map = {int(k): v for k, v in json.load(f).items()}
+    if media_map_path.exists():
+        try:
+            with open(media_map_path) as f:
+                media_map = {int(k) if str(k).isdigit() else k: v for k, v in json.load(f).items()}
+        except Exception:
+            media_map = {}
     
     project.render_status = "rendering"
     add_log(project_id, "RENDER", 78, "Starting parallel FFmpeg video assembly...")
@@ -617,6 +824,10 @@ async def render_video(project_id: str, background_tasks: BackgroundTasks, paylo
             )
             
             clean_project_temp_renders(project_dir)
+
+            # Update saved media map
+            with open(project_dir / "media_map.json", 'w') as f:
+                json.dump(media_map, f)
 
             output_rel = f"/videos/{project_id}/final_video.mp4"
             project.output_path = output_rel
@@ -655,6 +866,7 @@ async def get_status(project_id: str):
         "percent": latest_percent,
         "logs": logs,
         "storyboard": project.storyboard.model_dump() if project.storyboard else None,
+        "timeline": project.timeline.model_dump() if project.timeline else None,
         "media_assets": project.media_assets
     }
 
@@ -664,6 +876,122 @@ async def get_logs(project_id: str):
     if project_id not in project_logs:
         return {"logs": []}
     return {"logs": project_logs[project_id]}
+
+@app.get("/api/timeline/{project_id}")
+async def get_project_timeline(project_id: str):
+    """Retrieve OpenCut multi-track timeline for project"""
+    if project_id not in projects:
+        raise HTTPException(404, "Project not found")
+    project = projects[project_id]
+    project_dir = PROJECTS_DIR / project_id
+
+    if not project.timeline:
+        media_map = {}
+        media_map_path = project_dir / "media_map.json"
+        if media_map_path.exists():
+            with open(media_map_path) as f:
+                media_map = json.load(f)
+        if project.storyboard:
+            project.timeline = storyboard_to_timeline(project.storyboard, media_map)
+            with open(project_dir / "timeline.json", "w") as f:
+                f.write(project.timeline.model_dump_json(indent=2))
+
+    return {
+        "project_id": project_id,
+        "timeline": project.timeline.model_dump() if project.timeline else None
+    }
+
+@app.post("/api/timeline/{project_id}")
+async def update_project_timeline(project_id: str, payload: dict):
+    """Save user modifications from OpenCut multi-track timeline and synchronize storyboard"""
+    if project_id not in projects:
+        raise HTTPException(404, "Project not found")
+    
+    raw_tl = payload.get("timeline", payload)
+    try:
+        timeline = TimelineProject.model_validate(raw_tl)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid timeline payload: {str(e)}")
+
+    projects[project_id].timeline = timeline
+    project_dir = PROJECTS_DIR / project_id
+    with open(project_dir / "timeline.json", "w") as f:
+        f.write(timeline.model_dump_json(indent=2))
+
+    # Synchronize Storyboard state
+    sb = timeline_to_storyboard(timeline)
+    projects[project_id].storyboard = sb
+    with open(project_dir / "storyboard.json", "w") as f:
+        f.write(sb.model_dump_json(indent=2))
+
+    add_log(project_id, "EDIT", 50, "OpenCut Multi-Track Timeline updated and synced")
+    return {
+        "message": "Timeline updated and synced with storyboard",
+        "project_id": project_id,
+        "timeline": timeline.model_dump(),
+        "storyboard": sb.model_dump()
+    }
+
+@app.post("/api/render-timeline/{project_id}")
+async def render_timeline_endpoint(project_id: str, background_tasks: BackgroundTasks, payload: Optional[dict] = None):
+    """Assemble final video directly from OpenCut Multi-Track timeline model"""
+    if project_id not in projects:
+        raise HTTPException(404, "Project not found")
+    
+    project = projects[project_id]
+    project_dir = PROJECTS_DIR / project_id
+
+    if payload:
+        raw_tl = payload.get("timeline", payload)
+        if raw_tl and isinstance(raw_tl, dict) and "tracks" in raw_tl:
+            try:
+                project.timeline = TimelineProject.model_validate(raw_tl)
+                with open(project_dir / "timeline.json", "w") as f:
+                    f.write(project.timeline.model_dump_json(indent=2))
+            except Exception as e:
+                print(f"[RENDER-TL] Note: Timeline payload update failed: {e}")
+
+    if not project.timeline:
+        if project.storyboard:
+            media_map = {}
+            media_map_path = project_dir / "media_map.json"
+            if media_map_path.exists():
+                with open(media_map_path) as f:
+                    media_map = json.load(f)
+            project.timeline = storyboard_to_timeline(project.storyboard, media_map)
+        else:
+            raise HTTPException(400, "No timeline or storyboard found to render")
+
+    project.render_status = "rendering"
+    add_log(project_id, "RENDER", 10, "Starting OpenCut Multi-Track video assembly...")
+
+    def do_timeline_render():
+        try:
+            def on_progress(pct: int, msg: str):
+                add_log(project_id, "RENDER", pct, msg)
+
+            final_path = render_timeline(
+                project.timeline,
+                project_dir,
+                progress_callback=on_progress
+            )
+            clean_project_temp_renders(project_dir)
+
+            output_rel = f"/videos/{project_id}/final_video.mp4"
+            project.output_path = output_rel
+            project.render_status = "done"
+            add_log(project_id, "RENDER", 100, "OpenCut Multi-Track video render complete! Ready for download.")
+        except Exception as e:
+            add_log(project_id, "ERROR", 0, f"Timeline render failed: {str(e)}")
+            project.render_status = "error"
+
+    background_tasks.add_task(do_timeline_render)
+
+    return {
+        "project_id": project_id,
+        "status": "rendering_started",
+        "message": "OpenCut Multi-Track video is being assembled."
+    }
 
 @app.post("/api/update-storyboard/{project_id}")
 async def update_storyboard(project_id: str, payload: dict):
@@ -679,7 +1007,17 @@ async def update_storyboard(project_id: str, payload: dict):
     with open(project_dir / "storyboard.json", 'w') as f:
         f.write(storyboard.model_dump_json(indent=2))
     
-    add_log(project_id, "EDIT", 50, "Storyboard updated by user")
+    # Also sync timeline
+    media_map = {}
+    media_map_path = project_dir / "media_map.json"
+    if media_map_path.exists():
+        with open(media_map_path) as f:
+            media_map = json.load(f)
+    projects[project_id].timeline = storyboard_to_timeline(storyboard, media_map)
+    with open(project_dir / "timeline.json", "w") as f:
+        f.write(projects[project_id].timeline.model_dump_json(indent=2))
+
+    add_log(project_id, "EDIT", 50, "Storyboard and Timeline updated by user")
     
     return {"message": "Storyboard updated", "project_id": project_id}
 

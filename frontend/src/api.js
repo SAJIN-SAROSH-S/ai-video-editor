@@ -199,3 +199,89 @@ export const getDiskUsage = async () => {
     throw new Error(`Failed to get disk usage: ${error.message}`);
   }
 };
+
+export const getTimeline = async (projectId) => {
+  try {
+    const res = await withTimeout(
+      fetch(`${API_BASE}/timeline/${projectId}`),
+      FETCH_TIMEOUT
+    );
+    return handleResponse(res);
+  } catch (error) {
+    if (error.message.includes('timeout')) {
+      throw new Error('Request timed out. Please check your connection and try again.');
+    }
+    throw new Error(`Failed to get timeline: ${error.message}`);
+  }
+};
+
+export const updateTimeline = async (projectId, timeline) => {
+  try {
+    const res = await withTimeout(
+      fetch(`${API_BASE}/timeline/${projectId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ timeline })
+      }),
+      FETCH_TIMEOUT
+    );
+    return handleResponse(res);
+  } catch (error) {
+    if (error.message.includes('timeout')) {
+      throw new Error('Request timed out. Please check your connection and try again.');
+    }
+    throw new Error(`Failed to update timeline: ${error.message}`);
+  }
+};
+
+export const renderTimeline = async (projectId, timeline = null) => {
+  try {
+    const options = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    };
+    if (timeline) {
+      options.body = JSON.stringify({ timeline });
+    }
+    const res = await withTimeout(
+      fetch(`${API_BASE}/render-timeline/${projectId}`, options),
+      FETCH_TIMEOUT
+    );
+    return handleResponse(res);
+  } catch (error) {
+    if (error.message.includes('timeout')) {
+      throw new Error('Request timed out. Please check your connection and try again.');
+    }
+    throw new Error(`Failed to render timeline: ${error.message}`);
+  }
+};
+
+export const uploadCustomMedia = async (projectId, sceneId, fileOrUrl) => {
+  try {
+    let options;
+    if (typeof fileOrUrl === 'string') {
+      options = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: fileOrUrl })
+      };
+    } else {
+      const formData = new FormData();
+      formData.append('file', fileOrUrl);
+      options = {
+        method: 'POST',
+        body: formData
+      };
+    }
+    const res = await withTimeout(
+      fetch(`${API_BASE}/upload-media/${projectId}/${sceneId}`, options),
+      60000
+    );
+    return handleResponse(res);
+  } catch (error) {
+    if (error.message.includes('timeout')) {
+      throw new Error('Upload timed out. Please try again.');
+    }
+    throw new Error(`Failed to upload media: ${error.message}`);
+  }
+};

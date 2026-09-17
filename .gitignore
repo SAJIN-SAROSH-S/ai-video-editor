@@ -20,3 +20,14 @@ frontend/.env
 *.swp
 .vscode/
 .idea/
+
+# Test outputs & temporary media
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.mp3
+*.wav
+backend/test_*.*
+test_*.*
+

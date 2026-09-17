@@ -1,9 +1,14 @@
 import { useState } from 'react';
-import { createProject, fetchMedia, updateStoryboard, renderVideo, getStatus, generateStoryboard } from './api';
+import {
+  createProject, fetchMedia, updateStoryboard, renderVideo, getStatus, generateStoryboard,
+  getTimeline, updateTimeline, renderTimeline
+} from './api';
 import StoryboardViewer from './components/StoryboardViewer';
 import TimelineEditor from './components/TimelineEditor';
+import OpenCutTimeline from './components/OpenCutTimeline';
 import VideoPreview from './components/VideoPreview';
 import ProgressLog from './components/ProgressLog';
+import { storyboardToTimeline, timelineToStoryboard } from './utils/timelineConverter';
 import { SAMPLE_TEMPLATES, LLM_PROMPT_SKILLS } from './data/templates';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -109,6 +114,46 @@ const VIDEO_STYLES = [
   { value: 'educational', label: '📚 Educational', color: '#3B82F6' },
   { value: 'vlog', label: '🎤 Vlog/Casual', color: '#10B981' },
   { value: 'promotional', label: '📣 Promotional', color: '#F59E0B' },
+];
+
+// ─── Audio & Voiceover Config ──────────────────────────────────────────────
+
+const VOICEOVER_GENDERS = [
+  { value: 'male', label: '👨 Male Voice', desc: 'Deep, clear resonance' },
+  { value: 'female', label: '👩 Female Voice', desc: 'Crisp, articulate tone' },
+  { value: 'none', label: '🔇 No Voiceover', desc: 'Music & SFX only' },
+];
+
+const VOICEOVER_PERSONAS = [
+  { value: 'narrator', label: '🎙️ Narrator', desc: 'Documentary & explainer' },
+  { value: 'storyteller', label: '📖 Storyteller', desc: 'Immersive & captivating' },
+  { value: 'host', label: '⚡ Energetic Host', desc: 'Fast-paced & engaging' },
+  { value: 'deep_authority', label: '🏛️ Deep Authority', desc: 'Tech & corporate' },
+  { value: 'friendly_guide', label: '🤝 Friendly Guide', desc: 'Casual & welcoming' },
+];
+
+const VOICEOVER_TONES = [
+  { value: 'professional', label: '👔 Professional', desc: 'Balanced & authoritative' },
+  { value: 'energetic', label: '⚡ High Energy', desc: 'Fast, hype, upbeat' },
+  { value: 'cinematic', label: '🎬 Cinematic', desc: 'Dramatic impact' },
+  { value: 'warm', label: '☕ Warm & Friendly', desc: 'Conversational' },
+  { value: 'inspiring', label: '🌟 Inspiring', desc: 'Motivational uplift' },
+];
+
+const BACKGROUND_MUSIC_TRACKS = [
+  { value: 'upbeat_tech', label: '🚀 Upbeat Tech', desc: 'Modern arps & pulse' },
+  { value: 'cinematic_ambient', label: '🎬 Cinematic Ambient', desc: 'Lush pads & sub drone' },
+  { value: 'lofi_chill', label: '☕ Lo-Fi Chill', desc: 'Warm Rhodes & tape warmth' },
+  { value: 'high_energy', label: '⚡ High Energy EDM', desc: 'Driving electronic pulse' },
+  { value: 'corporate_inspire', label: '💼 Corporate Inspire', desc: 'Uplifting major chords' },
+  { value: 'none', label: '🔇 No Music (Muted)', desc: 'Voiceover only' },
+];
+
+const SFX_PACKS = [
+  { value: 'whoosh_hits', label: '✨ Whooshes & Impacts', desc: 'Transition sweeps' },
+  { value: 'cyber_glitch', label: '🤖 Cyber Glitches', desc: 'Tech chirps & digital FX' },
+  { value: 'subtle_pops', label: '💥 Pops & Clicks', desc: 'Clean UI accent sounds' },
+  { value: 'none', label: 'Off', desc: 'No transition SFX' },
 ];
 
 const APP_STEPS = [
@@ -291,12 +336,39 @@ function App() {
   const [appliedSkillId, setAppliedSkillId] = useState(null);
   const [aiTopic, setAiTopic] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [editorMode, setEditorMode] = useState('opencut'); // 'opencut' | 'storyboard'
+  const [timeline, setTimeline] = useState(null);
 
   // Video Options state
   const [selectedOrientation, setSelectedOrientation] = useState('16:9');
   const [selectedDuration, setSelectedDuration] = useState(60);
   const [selectedStyle, setSelectedStyle] = useState('educational');
   const [selectedMotionFx, setSelectedMotionFx] = useState([]);
+
+  // Voiceover & Audio state
+  const [selectedVoiceGender, setSelectedVoiceGender] = useState('male');
+  const [selectedVoicePersona, setSelectedVoicePersona] = useState('narrator');
+  const [selectedVoiceTone, setSelectedVoiceTone] = useState('professional');
+  const [selectedBgMusic, setSelectedBgMusic] = useState('upbeat_tech');
+  const [selectedMusicVol, setSelectedMusicVol] = useState(0.15);
+  const [selectedSfxPack, setSelectedSfxPack] = useState('whoosh_hits');
+
+  const applySelectedAudioConfig = (sb) => {
+    if (!sb) return sb;
+    return {
+      ...sb,
+      audio_config: {
+        voiceover_enabled: selectedVoiceGender !== 'none',
+        voiceover_gender: selectedVoiceGender,
+        voiceover_type: selectedVoicePersona,
+        voiceover_tone: selectedVoiceTone,
+        background_music: selectedBgMusic,
+        music_volume: selectedMusicVol,
+        sfx_enabled: selectedSfxPack !== 'none',
+        sfx_pack: selectedSfxPack
+      }
+    };
+  };
 
   const applySelectedMotionFx = (storyboard) => {
     if (!storyboard?.scenes) return storyboard;
@@ -319,16 +391,27 @@ function App() {
     setIsLoading(true);
     setShowLog(true);
     try {
-      const data = await createProject(applySelectedMotionFx(sanitized));
+      const data = await createProject(applySelectedAudioConfig(applySelectedMotionFx(sanitized)));
       setProjectId(data.project_id);
       setStoryboard(data.storyboard);
-      setShowLog(false);
+      setTimeline(data.timeline || storyboardToTimeline(data.storyboard));
       setStep('storyboard');
+
+      // Auto-fetch media immediately in background so visual assets are loaded
+      fetchMedia(data.project_id)
+        .then((mediaData) => {
+          if (mediaData?.media) {
+            setMediaAssets(mediaData.media);
+            setTimeline(mediaData.timeline || storyboardToTimeline(data.storyboard, mediaData.media));
+          }
+        })
+        .catch(err => console.log('Auto-fetch media background note:', err));
     } catch (e) {
       alert('Failed to initialize project: ' + e.message);
+    } finally {
+      setIsLoading(false);
       setShowLog(false);
     }
-    setIsLoading(false);
   };
 
   const handleJsonSubmit = () => {
@@ -396,11 +479,27 @@ function App() {
         aspect_ratio: selectedOrientation,
         style: selectedStyle,
         prompt_template: item.prompt,
-        prompt_id: item.id
+        prompt_id: item.id,
+        voiceover_gender: selectedVoiceGender,
+        voiceover_tone: selectedVoiceTone,
+        voiceover_type: selectedVoicePersona,
+        background_music: selectedBgMusic
       });
       setProjectId(data.project_id);
-      setStoryboard(applySelectedMotionFx(data.storyboard));
+      const generatedSb = applySelectedAudioConfig(applySelectedMotionFx(data.storyboard));
+      setStoryboard(generatedSb);
+      setTimeline(data.timeline || storyboardToTimeline(generatedSb));
       setStep('storyboard');
+
+      // Auto-fetch media immediately in background
+      fetchMedia(data.project_id)
+        .then((mediaData) => {
+          if (mediaData?.media) {
+            setMediaAssets(mediaData.media);
+            setTimeline(mediaData.timeline || storyboardToTimeline(generatedSb, mediaData.media));
+          }
+        })
+        .catch(err => console.log('Auto-fetch media background note:', err));
     } catch (e) {
       alert('AI generation failed: ' + e.message);
     } finally {
@@ -416,6 +515,7 @@ function App() {
     }
     const updated = skill.apply(storyboard);
     setStoryboard(updated);
+    setTimeline(storyboardToTimeline(updated, mediaAssets));
     setAppliedSkillId(skill.id);
     setTimeout(() => setAppliedSkillId(null), 2000);
   };
@@ -435,6 +535,7 @@ function App() {
       }
       const data = await fetchMedia(projectId);
       setMediaAssets(data.media || []);
+      setTimeline(data.timeline || storyboardToTimeline(storyboard, data.media || []));
       setShowLog(false);
       setStep('media');
     } catch (e) {
@@ -448,6 +549,14 @@ function App() {
     setStep('rendering');
     setShowLog(true);
     try {
+      if (mediaAssets.length === 0 && projectId) {
+        try {
+          const mediaData = await fetchMedia(projectId);
+          if (mediaData?.media) setMediaAssets(mediaData.media);
+        } catch (mErr) {
+          console.log('Media fetch notice during render:', mErr);
+        }
+      }
       await renderVideo(projectId, storyboard);
     } catch (e) {
       alert('Render initiation failed: ' + e.message);
@@ -476,10 +585,86 @@ function App() {
     }, 1500);
   };
 
+  const handleRenderTimeline = async (timelineToRender) => {
+    const tl = timelineToRender || timeline || storyboardToTimeline(storyboard, mediaAssets);
+    setStep('rendering');
+    setShowLog(true);
+    try {
+      if (mediaAssets.length === 0 && projectId) {
+        try {
+          const mediaData = await fetchMedia(projectId);
+          if (mediaData?.media) setMediaAssets(mediaData.media);
+        } catch (mErr) {
+          console.log('Media fetch notice during timeline render:', mErr);
+        }
+      }
+      await renderTimeline(projectId, tl);
+    } catch (e) {
+      alert('OpenCut render initiation failed: ' + e.message);
+      setStep('media');
+      setShowLog(false);
+      return;
+    }
+    const interval = setInterval(async () => {
+      try {
+        const status = await getStatus(projectId);
+        setRenderStatus(status.status);
+        if (status.media_assets && status.media_assets.length > 0) {
+          setMediaAssets(status.media_assets);
+        }
+        if (status.status === 'done') {
+          clearInterval(interval);
+          setShowLog(false);
+          setStep('done');
+        } else if (status.status === 'error') {
+          clearInterval(interval);
+          setShowLog(false);
+          alert('Render failed during processing.');
+          setStep('media');
+        }
+      } catch (err) { console.error(err); }
+    }, 1500);
+  };
+
   const handleStoryboardUpdate = (updated) => {
     setStoryboard(updated);
+    const syncedTimeline = storyboardToTimeline(updated, mediaAssets);
+    setTimeline(syncedTimeline);
     if (projectId) {
       updateStoryboard(projectId, updated).catch(err => console.error("Auto-sync error:", err));
+    }
+  };
+
+  const handleTimelineUpdate = (updatedTimeline) => {
+    setTimeline(updatedTimeline);
+    const syncedSb = timelineToStoryboard(updatedTimeline);
+    if (syncedSb) {
+      setStoryboard(syncedSb);
+    }
+    if (projectId) {
+      updateTimeline(projectId, updatedTimeline).catch(err => console.error("Auto-sync timeline error:", err));
+    }
+  };
+
+  const handleMediaUploaded = (asset, updatedTimeline) => {
+    setMediaAssets(prev => {
+      const filtered = prev.filter(m => m.scene_id !== asset.scene_id);
+      return [...filtered, asset];
+    });
+
+    if (updatedTimeline) {
+      setTimeline(updatedTimeline);
+      const syncedSb = timelineToStoryboard(updatedTimeline);
+      if (syncedSb) setStoryboard(syncedSb);
+    } else if (storyboard) {
+      const updatedSb = {
+        ...storyboard,
+        scenes: storyboard.scenes.map(s =>
+          s.scene_id === asset.scene_id ? { ...s, visual_prompt: `Custom Media: ${asset.filename || 'Uploaded visual'}` } : s
+        )
+      };
+      setStoryboard(updatedSb);
+      setTimeline(storyboardToTimeline(updatedSb, [...mediaAssets.filter(m => m.scene_id !== asset.scene_id), asset]));
     }
   };
 
@@ -488,6 +673,7 @@ function App() {
       setStep('input');
       setProjectId(null);
       setStoryboard(null);
+      setTimeline(null);
       setMediaAssets([]);
       setJsonText('');
       setRenderStatus('idle');
@@ -681,6 +867,126 @@ function App() {
                   </div>
                 </div>
               </div>
+
+              {/* ── Voiceover & Audio Studio Section ── */}
+              <div className="mt-6 pt-6 border-t border-slate-800/80 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                    <span>🎙️</span> Voiceover & Audio Studio (Open-Source Royalty-Free)
+                  </h3>
+                  <span className="text-[11px] text-emerald-400 font-mono">
+                    ✓ Open-Source Procedural Synth & TTS Audio
+                  </span>
+                </div>
+
+                <div className="grid md:grid-cols-3 gap-6">
+                  {/* 1. Voiceover Gender & Persona */}
+                  <div className="space-y-3">
+                    <div>
+                      <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider block mb-2">
+                        1. Voiceover Voice
+                      </label>
+                      <div className="grid grid-cols-3 gap-1.5">
+                        {VOICEOVER_GENDERS.map(g => (
+                          <button
+                            key={g.value}
+                            onClick={() => setSelectedVoiceGender(g.value)}
+                            className={`flex flex-col items-center justify-center py-2 px-1 rounded-xl border text-xs transition ${
+                              selectedVoiceGender === g.value
+                                ? 'border-emerald-500 bg-emerald-500/10 text-emerald-300 font-semibold shadow-sm'
+                                : 'border-slate-800 bg-slate-950/40 text-slate-400 hover:border-slate-700'
+                            }`}
+                          >
+                            <span className="font-semibold text-[11px]">{g.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {selectedVoiceGender !== 'none' && (
+                      <div>
+                        <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1">
+                          Voice Persona / Type
+                        </label>
+                        <select
+                          value={selectedVoicePersona}
+                          onChange={e => setSelectedVoicePersona(e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-800 p-2.5 rounded-xl text-xs text-white focus:outline-none focus:border-emerald-500"
+                        >
+                          {VOICEOVER_PERSONAS.map(p => (
+                            <option key={p.value} value={p.value}>{p.label} - {p.desc}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 2. Voice Tone */}
+                  <div className="space-y-3">
+                    <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider block">
+                      2. Voiceover Tone & Delivery
+                    </label>
+                    <div className="space-y-1.5">
+                      {VOICEOVER_TONES.map(t => (
+                        <button
+                          key={t.value}
+                          onClick={() => setSelectedVoiceTone(t.value)}
+                          className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border text-xs transition ${
+                            selectedVoiceTone === t.value
+                              ? 'border-indigo-500 bg-indigo-500/10 text-white font-semibold shadow-sm'
+                              : 'border-slate-800 bg-slate-950/40 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                          }`}
+                        >
+                          <span className="font-medium">{t.label}</span>
+                          <span className="text-[10px] opacity-60">{t.desc}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* 3. Background Music & SFX */}
+                  <div className="space-y-3">
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+                          3. Royalty-Free Music
+                        </label>
+                        <span className="text-[10px] text-slate-500">Vol: {Math.round(selectedMusicVol * 100)}%</span>
+                      </div>
+                      <select
+                        value={selectedBgMusic}
+                        onChange={e => setSelectedBgMusic(e.target.value)}
+                        className="w-full bg-slate-950 border border-slate-800 p-2.5 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500 mb-2"
+                      >
+                        {BACKGROUND_MUSIC_TRACKS.map(m => (
+                          <option key={m.value} value={m.value}>{m.label} ({m.desc})</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block mb-1.5">
+                        Transition Sound Effects (SFX)
+                      </label>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {SFX_PACKS.map(sfx => (
+                          <button
+                            key={sfx.value}
+                            onClick={() => setSelectedSfxPack(sfx.value)}
+                            className={`py-1.5 px-2 rounded-xl border text-[11px] transition text-center ${
+                              selectedSfxPack === sfx.value
+                                ? 'border-amber-500/80 bg-amber-500/10 text-amber-300 font-semibold'
+                                : 'border-slate-800 bg-slate-950/40 text-slate-400 hover:border-slate-700'
+                            }`}
+                          >
+                            {sfx.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* ── Tabs Navigation ── */}
@@ -851,40 +1157,94 @@ function App() {
           </div>
         )}
 
-        {/* ═══════════════ STEP 2: STORYBOARD ══════════════════ */}
+        {/* ═══════════════ STEP 2: STORYBOARD / OPENCUT TIMELINE ══════════════════ */}
         {step === 'storyboard' && storyboard && (
           <div className="space-y-6">
-
-            {/* Auto-Editing Skills Toolbar */}
-            <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-5 space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
-                  <span>🎬</span> Auto Editing Presets (Apply to All Scenes)
-                </span>
-                <span className="text-[11px] text-slate-500">1-Click Pacing & Camera Overrides</span>
+            {/* View Mode Switcher Header */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800 p-2.5 rounded-2xl">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setEditorMode('opencut')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                    editorMode === 'opencut'
+                      ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  }`}
+                >
+                  <span>🎛️ OpenCut Multi-Track Studio</span>
+                </button>
+                <button
+                  onClick={() => setEditorMode('storyboard')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                    editorMode === 'storyboard'
+                      ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  }`}
+                >
+                  <span>📋 AI Storyboard Grid</span>
+                </button>
               </div>
 
-              <div className="flex flex-wrap gap-2">
-                {AUTO_EDITING_SKILLS.map(skill => (
-                  <button
-                    key={skill.id}
-                    onClick={() => handleApplySkill(skill)}
-                    title={skill.desc}
-                    className={`text-xs px-3.5 py-2 rounded-xl border font-semibold transition ${
-                      appliedSkillId === skill.id
-                        ? 'border-green-500 bg-green-500/10 text-green-300'
-                        : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:border-blue-500/60 hover:text-white'
-                    }`}
-                  >
-                    {appliedSkillId === skill.id ? '✓ Applied!' : skill.label}
-                  </button>
-                ))}
-              </div>
+              <span className="text-[11px] text-slate-400 font-mono hidden md:block">
+                ⚡ OpenCut NLE Timeline Engine Active
+              </span>
             </div>
 
-            <StoryboardViewer storyboard={storyboard} onUpdate={handleStoryboardUpdate} />
+            {/* View 1: OpenCut Interactive Multi-Track Timeline */}
+            {editorMode === 'opencut' && (
+              <OpenCutTimeline
+                timeline={timeline || storyboardToTimeline(storyboard, mediaAssets)}
+                projectId={projectId}
+                mediaAssets={mediaAssets}
+                onUpdateTimeline={handleTimelineUpdate}
+                onRenderTimeline={handleRenderTimeline}
+                onMediaUploaded={handleMediaUploaded}
+                isRendering={isLoading}
+              />
+            )}
 
-            <div className="flex items-center justify-center gap-3 pt-4">
+            {/* View 2: Classic Storyboard Grid Mode */}
+            {editorMode === 'storyboard' && (
+              <div className="space-y-6">
+                {/* Auto-Editing Skills Toolbar */}
+                <div className="bg-slate-900/60 border border-slate-800/80 rounded-2xl p-5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                      <span>🎬</span> Auto Editing Presets (Apply to All Scenes)
+                    </span>
+                    <span className="text-[11px] text-slate-500">1-Click Pacing & Camera Overrides</span>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    {AUTO_EDITING_SKILLS.map(skill => (
+                      <button
+                        key={skill.id}
+                        onClick={() => handleApplySkill(skill)}
+                        title={skill.desc}
+                        className={`text-xs px-3.5 py-2 rounded-xl border font-semibold transition ${
+                          appliedSkillId === skill.id
+                            ? 'border-green-500 bg-green-500/10 text-green-300'
+                            : 'border-slate-800 bg-slate-950/40 text-slate-300 hover:border-blue-500/60 hover:text-white'
+                        }`}
+                      >
+                        {appliedSkillId === skill.id ? '✓ Applied!' : skill.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <StoryboardViewer
+                  storyboard={storyboard}
+                  projectId={projectId}
+                  mediaAssets={mediaAssets}
+                  onUpdate={handleStoryboardUpdate}
+                  onMediaUploaded={handleMediaUploaded}
+                />
+              </div>
+            )}
+
+            {/* Bottom Actions */}
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-4">
               <button
                 onClick={() => setStep('input')}
                 className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 px-6 py-3 rounded-xl text-xs font-semibold transition"
@@ -906,8 +1266,60 @@ function App() {
         {/* ═══════════════ STEP 3: MEDIA & TIMELINE ══════════════════ */}
         {step === 'media' && (
           <div className="space-y-6">
-            <TimelineEditor storyboard={storyboard} mediaAssets={mediaAssets} onUpdate={handleStoryboardUpdate} />
+            {/* View Mode Switcher Header */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/80 border border-slate-800 p-2.5 rounded-2xl">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setEditorMode('opencut')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                    editorMode === 'opencut'
+                      ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md shadow-purple-500/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  }`}
+                >
+                  <span>🎛️ OpenCut Multi-Track Studio</span>
+                </button>
+                <button
+                  onClick={() => setEditorMode('storyboard')}
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 ${
+                    editorMode === 'storyboard'
+                      ? 'bg-blue-600 text-white shadow-md shadow-blue-500/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60'
+                  }`}
+                >
+                  <span>📋 Scene & Asset Inspector</span>
+                </button>
+              </div>
 
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleRenderTimeline()}
+                  className="bg-purple-600 hover:bg-purple-500 text-white px-5 py-2 rounded-xl font-bold text-xs shadow-md shadow-purple-500/20 transition flex items-center gap-1.5"
+                >
+                  <span>Render 1080p Video 🎬</span>
+                </button>
+              </div>
+            </div>
+
+            {/* View 1: OpenCut Multi-Track Timeline */}
+            {editorMode === 'opencut' && (
+              <OpenCutTimeline
+                timeline={timeline || storyboardToTimeline(storyboard, mediaAssets)}
+                projectId={projectId}
+                mediaAssets={mediaAssets}
+                onUpdateTimeline={handleTimelineUpdate}
+                onRenderTimeline={handleRenderTimeline}
+                onMediaUploaded={handleMediaUploaded}
+                isRendering={isLoading}
+              />
+            )}
+
+            {/* View 2: Interactive Media Timeline */}
+            {editorMode === 'storyboard' && (
+              <TimelineEditor storyboard={storyboard} mediaAssets={mediaAssets} onUpdate={handleStoryboardUpdate} />
+            )}
+
+            {/* Bottom Actions */}
             <div className="flex items-center justify-center gap-3 pt-4">
               <button
                 onClick={() => setStep('storyboard')}
@@ -916,7 +1328,7 @@ function App() {
                 ← Back to Storyboard
               </button>
               <button
-                onClick={handleRender}
+                onClick={() => handleRenderTimeline()}
                 className="bg-purple-600 hover:bg-purple-500 text-white px-9 py-3 rounded-xl font-bold text-xs shadow-lg shadow-purple-500/20 transition flex items-center gap-2"
               >
                 <span>Render Final 1080p Video 🎬</span>
@@ -941,7 +1353,10 @@ function App() {
         {/* ═══════════════ STEP 5: DONE / PREVIEW ══════════════════ */}
         {step === 'done' && (
           <div className="space-y-6">
-            <VideoPreview projectId={projectId} />
+            <VideoPreview
+              projectId={projectId}
+              onEdit={() => setStep('storyboard')}
+            />
             <div className="text-center pt-2">
               <button
                 onClick={() => { setStep('input'); setProjectId(null); setStoryboard(null); setMediaAssets([]); }}

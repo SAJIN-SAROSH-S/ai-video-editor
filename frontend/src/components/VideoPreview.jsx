@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { getStatus, SERVER_ROOT, cleanupProjectMedia } from '../api';
 
-export default function VideoPreview({ projectId }) {
+export default function VideoPreview({ projectId, onEdit }) {
   const [videoUrl, setVideoUrl] = useState(null);
   const [storyboard, setStoryboard] = useState(null);
   const [isCleaning, setIsCleaning] = useState(false);
@@ -95,27 +95,36 @@ export default function VideoPreview({ projectId }) {
           />
         </div>
         
-        <div className="flex flex-wrap items-center justify-center gap-4 mt-6 pt-4 border-t border-gray-800">
+        <div className="flex flex-wrap items-center justify-center gap-3 mt-6 pt-4 border-t border-gray-800">
           <a 
             href={videoUrl}
             download={`video_${projectId}.mp4`}
-            className="bg-green-600 hover:bg-green-500 text-white px-7 py-3 rounded-xl font-bold text-sm shadow-lg shadow-green-500/20 transition flex items-center gap-2"
+            className="bg-green-600 hover:bg-green-500 text-white px-6 py-3 rounded-xl font-bold text-xs shadow-lg shadow-green-500/20 transition flex items-center gap-2"
           >
             <span>📥</span> Download MP4 Video
           </a>
+
+          {onEdit && (
+            <button
+              onClick={onEdit}
+              className="bg-indigo-600 hover:bg-indigo-500 text-white px-6 py-3 rounded-xl font-bold text-xs shadow-lg shadow-indigo-500/20 transition flex items-center gap-2"
+            >
+              <span>✏️</span> Edit Visuals, Text & Length
+            </button>
+          )}
 
           {!assetsCleaned ? (
             <button
               onClick={handleDeleteAssets}
               disabled={isCleaning}
-              className="bg-red-950/40 hover:bg-red-900/60 text-red-300 border border-red-800/50 hover:border-red-700 px-5 py-3 rounded-xl font-semibold text-sm transition flex items-center gap-2 disabled:opacity-50"
+              className="bg-red-950/40 hover:bg-red-900/60 text-red-300 border border-red-800/50 hover:border-red-700 px-4 py-3 rounded-xl font-semibold text-xs transition flex items-center gap-2 disabled:opacity-50"
             >
-              <span>🧹</span> {isCleaning ? 'Deleting Assets...' : 'Delete Raw Assets (Free Space)'}
+              <span>🧹</span> {isCleaning ? 'Deleting...' : 'Delete Raw Assets'}
             </button>
           ) : (
             <button
               disabled
-              className="bg-gray-800/40 text-gray-500 border border-gray-800 px-5 py-3 rounded-xl text-sm font-medium flex items-center gap-2 cursor-not-allowed"
+              className="bg-gray-800/40 text-gray-500 border border-gray-800 px-4 py-3 rounded-xl text-xs font-medium flex items-center gap-2 cursor-not-allowed"
             >
               <span>✓</span> Raw Assets Cleaned
             </button>
@@ -126,9 +135,9 @@ export default function VideoPreview({ projectId }) {
               navigator.clipboard.writeText(videoUrl);
               alert('Video link copied to clipboard!');
             }}
-            className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-5 py-3 rounded-xl font-semibold text-sm transition"
+            className="bg-gray-800 hover:bg-gray-700 text-gray-300 px-4 py-3 rounded-xl font-semibold text-xs transition flex items-center gap-1.5"
           >
-            🔗 Copy Link
+            <span>🔗</span> Copy Link
           </button>
         </div>
       </div>

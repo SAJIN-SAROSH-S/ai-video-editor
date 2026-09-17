@@ -81,11 +81,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     with open(ass_path, 'w') as f:
         f.write(ass_content)
     
-    # Burn subtitles
+    # Format ass_path for FFmpeg filter (escape colon and use forward slashes)
+    formatted_ass_path = ass_path.as_posix().replace(":", "\\:")
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
-        "-vf", f"ass={ass_path}",
+        "-vf", f"ass='{formatted_ass_path}'",
         "-c:a", "copy",
         str(output_path)
     ]
